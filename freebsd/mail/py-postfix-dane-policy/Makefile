@@ -18,7 +18,7 @@ RUN_DEPENDS=	${PYTHON_PKGNAMEPREFIX}dnspython>=2.0:dns/py-dnspython@${PY_FLAVOR}
 USES=		python
 USE_GITHUB=	yes
 GH_ACCOUNT=	Kernel-Error
-USE_PYTHON=	autoplist concurrent pep517
+USE_PYTHON=	autoplist pep517
 USE_RC_SUBR=	postfix_dane_policy
 
 NO_ARCH=	yes

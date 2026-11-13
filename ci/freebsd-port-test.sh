@@ -47,7 +47,7 @@ make BATCH=yes check-plist
 make BATCH=yes package
 
 echo "==> install package"
-pkg add work/pkg/*.pkg
+pkg add "$(make -V WRKDIR)"/pkg/*.pkg
 postfix-dane-policy --version
 man -w postfix-dane-policy
 sh -n /usr/local/etc/rc.d/postfix_dane_policy
