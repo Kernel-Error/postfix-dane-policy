@@ -105,6 +105,36 @@ class TcpServerTests(_ServerTestBase):
             self.assertEqual(sock.recv(100), b"")
             self.assertLess(time.monotonic() - start, 3)
 
+    def test_dripping_bytes_cannot_stretch_the_deadline(self):
+        self.server.request_timeout = 1.0
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as sock:
+            start = time.monotonic()
+            closed = False
+            for byte in b"40:dane " + b"x" * 30:
+                try:
+                    sock.sendall(bytes([byte]))
+                except OSError:
+                    closed = True
+                    break
+                time.sleep(0.2)
+                if time.monotonic() - start > 4:
+                    break
+            if not closed:
+                sock.settimeout(3)
+                try:
+                    closed = sock.recv(100) == b""
+                except OSError:
+                    closed = True
+            self.assertTrue(closed)
+            self.assertLess(time.monotonic() - start, 3.5)
+
+    def test_pipelined_requests(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as sock:
+            sock.sendall(srv.encode_netstring("dane ex.de") + srv.encode_netstring("dane x.de"))
+            rfile = sock.makefile("rb")
+            self.assertEqual(srv.read_netstring(rfile), b"OK dane-only")
+            self.assertEqual(srv.read_netstring(rfile), b"NOTFOUND ")
+
     def test_idle_connection_is_closed(self):
         self.server.idle_timeout = 0.5
         with socket.create_connection(("127.0.0.1", self.port), timeout=5) as sock:
@@ -155,6 +185,24 @@ class UnixServerTests(_ServerTestBase):
             sock.settimeout(5)
             sock.connect(self.path)
             self.assertEqual(_ask(sock, "dane x.de"), "NOTFOUND ")
+
+    def test_refuses_socket_in_use(self):
+        self.start(srv.UnixSocketmapServer(self.path, StaticPolicy({}), "dane"))
+        with self.assertRaises(RuntimeError):
+            srv.UnixSocketmapServer(self.path, StaticPolicy({}), "dane")
+        self.assertTrue(os.path.exists(self.path))
+
+    def test_cleanup_keeps_a_replaced_socket(self):
+        server = srv.UnixSocketmapServer(self.path, StaticPolicy({}), "dane")
+        os.unlink(self.path)                       # someone replaced the path meanwhile
+        other = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        other.bind(self.path)
+        try:
+            server.server_close()
+            self.assertTrue(os.path.exists(self.path))
+        finally:
+            other.close()
+            os.unlink(self.path)
 
     def test_refuses_non_socket_path(self):
         with open(self.path, "w") as fh:

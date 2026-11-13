@@ -27,24 +27,43 @@ def encode_netstring(text):
     return str(len(data)).encode("ascii") + b":" + data + b","
 
 
-def _read(rfile, size, sock, deadline):
-    if sock is not None and deadline is not None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ValueError("request timeout")
-        sock.settimeout(remaining)
-    return rfile.read(size)
+class SocketReader:
+    """Buffered reader on a raw socket that enforces a deadline.
 
-
-def read_netstring(rfile, sock=None, deadline=None, first=b""):
-    """Read one netstring; return bytes, or None on clean EOF.
-
-    With sock and deadline the whole netstring has to arrive before the
-    deadline (protection against slow senders).
+    Unlike io.BufferedReader.read(n), which may call recv() several times
+    with the full socket timeout each, the remaining time is recomputed
+    before every recv(), so a client dripping single bytes can't stretch a
+    request beyond its deadline.
     """
+
+    def __init__(self, sock, idle_timeout):
+        self.sock = sock
+        self.idle_timeout = idle_timeout
+        self.deadline = None
+        self._buf = b""
+
+    def read(self, size):
+        while len(self._buf) < size:
+            if self.deadline is None:
+                self.sock.settimeout(self.idle_timeout)
+            else:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError("request timeout")
+                self.sock.settimeout(remaining)
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            self._buf += chunk
+        data, self._buf = self._buf[:size], self._buf[size:]
+        return data
+
+
+def read_netstring(rfile, first=b""):
+    """Read one netstring from anything with read(n); bytes, or None on clean EOF."""
     length = b""
     while True:
-        ch = first if first else _read(rfile, 1, sock, deadline)
+        ch = first if first else rfile.read(1)
         first = b""
         if not ch:
             if length:
@@ -60,13 +79,10 @@ def read_netstring(rfile, sock=None, deadline=None, first=b""):
     size = int(length)
     if size > MAX_NETSTRING:
         raise ValueError("netstring too long")
-    data = b""
-    while len(data) < size:
-        chunk = _read(rfile, size - len(data), sock, deadline)
-        if not chunk:
-            raise ValueError("truncated netstring")
-        data += chunk
-    if _read(rfile, 1, sock, deadline) != b",":
+    data = rfile.read(size)
+    if len(data) != size:
+        raise ValueError("truncated netstring")
+    if rfile.read(1) != b",":
         raise ValueError("truncated netstring")
     return data
 
@@ -87,21 +103,18 @@ def handle_request(policy, mapname, data):
         return "TEMP internal error"
 
 
-class SocketmapHandler(socketserver.StreamRequestHandler):
-    def setup(self):
-        self.timeout = self.server.idle_timeout
-        super().setup()
-
+class SocketmapHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        sock = self.connection
+        sock = self.request
+        reader = SocketReader(sock, self.server.idle_timeout)
         while True:
             try:
-                sock.settimeout(self.server.idle_timeout)
-                first = self.rfile.read(1)
+                reader.deadline = None
+                first = reader.read(1)
                 if not first:
                     return
-                deadline = time.monotonic() + self.server.request_timeout
-                data = read_netstring(self.rfile, sock=sock, deadline=deadline, first=first)
+                reader.deadline = time.monotonic() + self.server.request_timeout
+                data = read_netstring(reader, first=first)
             except (ValueError, OSError) as exc:
                 log.warning("protocol error from %r: %s", self.client_address, exc)
                 return
@@ -109,8 +122,8 @@ class SocketmapHandler(socketserver.StreamRequestHandler):
                 return
             reply = handle_request(self.server.policy, self.server.mapname, data)
             try:
-                self.wfile.write(encode_netstring(reply))
-                self.wfile.flush()
+                sock.settimeout(self.server.request_timeout)
+                sock.sendall(encode_netstring(reply))
             except OSError:
                 return
 
@@ -161,22 +174,43 @@ class SocketmapServer(_SocketmapServerMixin, socketserver.ThreadingTCPServer):
         super().__init__(address, SocketmapHandler)
 
 
+def _socket_in_use(path):
+    """True if something accepts connections on the unix socket path."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(1)
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
 class UnixSocketmapServer(_SocketmapServerMixin, socketserver.ThreadingUnixStreamServer):
     def __init__(self, path, policy, mapname, max_connections=DEFAULT_MAX_CONNECTIONS):
         self._init_socketmap(policy, mapname, max_connections)
         self.socket_path = path
+        self._socket_id = None
         if os.path.lexists(path):
             if not stat.S_ISSOCK(os.lstat(path).st_mode):
                 raise RuntimeError("%s exists and is not a socket" % path)
-            os.unlink(path)
+            if _socket_in_use(path):
+                raise RuntimeError("%s is in use by another process" % path)
+            os.unlink(path)  # stale socket of a previous run
         super().__init__(path, SocketmapHandler)
         # Access is controlled by the permissions of the containing directory.
         os.chmod(path, 0o666)
+        st = os.lstat(path)
+        self._socket_id = (st.st_dev, st.st_ino)
 
     def server_close(self):
         super().server_close()
+        # only remove the socket if it is still ours (not replaced meanwhile)
         try:
-            os.unlink(self.socket_path)
+            st = os.lstat(self.socket_path)
+            if self._socket_id == (st.st_dev, st.st_ino):
+                os.unlink(self.socket_path)
         except OSError:
             pass
 
