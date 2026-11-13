@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 - 2026-11-13
+
+Fixes from a Codex (gpt-6.1-sol) review of 0.3.0.
+
+- CNAME MX hosts now follow Postfix exactly: the first *secure* TLSA RRset (expanded name, then original) decides, a lookup failure stops instead of trying the next name. Before, an unusable or failing RRset at the CNAME target could fall back to the original name and answer `dane-only` where Postfix still defers. (#6)
+- The per-request deadline is enforced per `recv()` on the raw socket, a client dripping single bytes can no longer stretch a request; replies are written with a timeout too. (#7)
+- The port ships its own `danepolicy` account definition (files/UIDs, files/GIDs via UID_FILES/GID_FILES) until the user is registered in the ports tree, so the README install path works. CI no longer patches the tree. (#8)
+- TLSA matching type 0 needs well-formed DER; the cache lifetime includes CNAME TTLs of the chain; a socket that is in use is not replaced and cleanup only removes our own socket; an injected empty cache is kept; host name labels are validated (no leading/trailing hyphen, valid A-labels, one root dot at most); CI checks socket access positively (postfix group) and negatively (permission denied). (#9)
+
 ## 0.3.0 - 2026-11-13
 
 Fixes from the security review of 0.2.0.

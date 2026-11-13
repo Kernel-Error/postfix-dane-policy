@@ -1,6 +1,6 @@
 PORTNAME=	postfix-dane-policy
 DISTVERSIONPREFIX=	v
-DISTVERSION=	0.3.0
+DISTVERSION=	0.3.1
 CATEGORIES=	mail python
 PKGNAMEPREFIX=	${PYTHON_PKGNAMEPREFIX}
 
@@ -24,6 +24,11 @@ USE_RC_SUBR=	postfix_dane_policy
 
 USERS=		danepolicy
 GROUPS=		danepolicy
+# danepolicy (801) is not registered in the ports tree yet. Until it is in
+# ${PORTSDIR}/UIDs and GIDs, take the definition from files/. Drop these two
+# lines and files/UIDs, files/GIDs when the port is committed.
+UID_FILES=	${PORTSDIR}/UIDs ${FILESDIR}/UIDs
+GID_FILES=	${PORTSDIR}/GIDs ${FILESDIR}/GIDs
 
 NO_ARCH=	yes
 

@@ -32,9 +32,9 @@ of each MX host through a validating resolver and checks the AD bit.
 
 Details:
 
-- **CNAME MX hosts** are handled like Postfix does it (RFC 7672 section 2.2.2): if the MX host
-  name is a DNSSEC-validated alias, TLSA is looked up at the expanded name first, then at the
-  original name.
+- **CNAME MX hosts** are handled like Postfix does it (RFC 7672 sections 2.2.2/2.2.3): if the MX
+  host name is a DNSSEC-validated alias, TLSA is looked up at the expanded name first, then at the
+  original name. The first secure TLSA RRset decides, a lookup failure stops (TEMP).
 - **No MX record** means the domain itself is checked as the implicit MX.
 - **Only usable TLSA counts:** DANE-TA(2)/DANE-EE(3), selector 0/1, matching type 0/1/2 with the
   right digest length (RFC 7672 section 3.1). A host that publishes only unusable records
@@ -84,7 +84,9 @@ address with `--dns`.
 ## Installation on FreeBSD
 
 The port lives in [`freebsd/mail/py-postfix-dane-policy`](freebsd/mail/py-postfix-dane-policy)
-until it is part of the ports tree. With a ports checkout in `/usr/ports`:
+until it is part of the ports tree. It brings its own definition of the `danepolicy` user
+(UID/GID 801) because that user isn't registered in the ports tree yet. With a ports checkout in
+`/usr/ports`:
 
 ```sh
 cp -R freebsd/mail/py-postfix-dane-policy /usr/ports/mail/

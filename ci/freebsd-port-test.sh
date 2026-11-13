@@ -23,23 +23,16 @@ PYTHONPATH=src python${PY} -m unittest discover -s tests -v
 echo "==> ports tree"
 git clone --quiet --depth 1 https://git.freebsd.org/ports.git /usr/ports
 
-echo "==> register danepolicy (UID/GID ${SVC_UID}) like a ports commit would"
-if ! grep -q '^danepolicy:' /usr/ports/UIDs; then
-	if cut -d: -f3 /usr/ports/UIDs | grep -qx "${SVC_UID}" || \
-	    cut -d: -f3 /usr/ports/GIDs | grep -qx "${SVC_UID}"; then
-		echo "UID/GID ${SVC_UID} is taken in the ports tree, pick another one"
-		exit 1
-	fi
-	# insert in UID/GID order, as portlint expects
-	insert_sorted() {
-		awk -v line="$2" -v id="${SVC_UID}" -F: '
-			!done && $0 !~ /^#/ && $3 + 0 > id { print line; done = 1 }
-			{ print }
-			END { if (!done) print line }' "$1" > "$1.new" && mv "$1.new" "$1"
-	}
-	insert_sorted /usr/ports/UIDs "danepolicy:*:${SVC_UID}:${SVC_UID}::0:0:postfix-dane-policy:/nonexistent:/usr/sbin/nologin"
-	insert_sorted /usr/ports/GIDs "danepolicy:*:${SVC_UID}:"
-	grep -n '^danepolicy:' /usr/ports/UIDs /usr/ports/GIDs
+echo "==> UID/GID ${SVC_UID} must still be free in the ports tree"
+# The port ships its own account definition (files/UIDs, files/GIDs) until
+# danepolicy is registered upstream; the tree is NOT patched here, so this
+# tests exactly what a user following the README does.
+if grep -q '^danepolicy:' /usr/ports/UIDs; then
+	echo "danepolicy is registered upstream now, drop UID_FILES/GID_FILES from the port"
+elif cut -d: -f3 /usr/ports/UIDs | grep -qx "${SVC_UID}" || \
+    cut -d: -f3 /usr/ports/GIDs | grep -qx "${SVC_UID}"; then
+	echo "UID/GID ${SVC_UID} is taken in the ports tree, pick another one"
+	exit 1
 fi
 
 echo "==> distfile from the working tree, named like the GitHub tarball"
@@ -103,10 +96,15 @@ r=$(ask "dane posteo.de");  echo "posteo.de -> $r";  [ "$r" = "12:OK dane-only,"
 r=$(ask "dane gmail.com");  echo "gmail.com -> $r";  [ "$r" = "9:NOTFOUND ," ]
 r=$(ask "dane .gmail.com"); echo ".gmail.com -> $r"; [ "$r" = "9:NOTFOUND ," ]
 
-echo "==> users outside the postfix group must not reach the socket"
-if su -m nobody -c "printf '14:dane posteo.de,' | nc -U -w 5 ${SOCK}" 2>/dev/null | grep -q dane; then
-	echo "socket reachable for nobody"; exit 1
-fi
+echo "==> socket access: postfix group yes, others no"
+pw useradd pdptest -g postfix -d /nonexistent -s /bin/sh
+connect_as() {
+	su -m "$1" -c "python${PY} -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print(\"connected\")' ${SOCK}" 2>&1 || true
+}
+out=$(connect_as pdptest); echo "pdptest (group postfix): $out"
+[ "$out" = "connected" ]
+out=$(connect_as nobody);  echo "nobody: $out"
+echo "$out" | grep -q PermissionError
 
 service postfix_dane_policy stop
 [ ! -S "${SOCK}" ] || { echo "socket not removed on stop"; exit 1; }
