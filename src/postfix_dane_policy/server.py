@@ -4,6 +4,7 @@ import argparse
 import logging
 import logging.handlers
 import os
+import socket
 import socketserver
 import sys
 
@@ -81,6 +82,8 @@ class SocketmapServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
     def __init__(self, address, policy, mapname):
+        # IPv6 literal (e.g. "::1") -> AF_INET6, everything else stays AF_INET
+        self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
         super().__init__(address, SocketmapHandler)
         self.policy = policy
         self.mapname = mapname
@@ -97,7 +100,8 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="postfix-dane-policy",
         description="DANE-aware TLS policy socketmap service for Postfix")
-    parser.add_argument("--listen", default="127.0.0.1", help="listen address (default 127.0.0.1)")
+    parser.add_argument("--listen", default="127.0.0.1",
+                        help="listen address, IPv4 or IPv6 (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8462, help="listen port (default 8462)")
     parser.add_argument("--dns", default="127.0.0.1",
                         help="validating DNS resolver address (default 127.0.0.1)")

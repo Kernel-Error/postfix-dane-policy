@@ -37,20 +37,43 @@ With a mixed MX set (some hosts with TLSA, some without) the reply is still `dan
 Postfix then delivers only to hosts it can authenticate via DANE and skips the others,
 rather than falling back to unauthenticated TLS.
 
+## Platform
+
+FreeBSD is the primary platform: rc.d script, man page and a port are part of this
+repository and the port is built, installed and started in CI on every push. The code
+itself is plain Python and also runs elsewhere, but only FreeBSD is tested end to end.
+
 ## Requirements
 
 - Python 3.10 or newer, [dnspython](https://www.dnspython.org/) 2.x
-- A **local, DNSSEC-validating resolver** such as Unbound. The service trusts the AD bit
-  of that resolver and does not validate on its own. Don't point it at a remote resolver
-  over an untrusted network.
-- Postfix with `smtp_dns_support_level = dnssec`
+- A **local, DNSSEC-validating resolver**. The service trusts the AD bit of that resolver
+  and does not validate on its own. Don't point it at a remote resolver over an untrusted
+  network.
+- Postfix with `smtp_dns_support_level = dnssec` (Postfix needs the validating resolver too)
 
-## Installation
+On FreeBSD the base system already has one: `local_unbound` validates DNSSEC and listens
+on 127.0.0.1, which matches the defaults of this service.
 
-FreeBSD: a port skeleton lives in [`freebsd/mail/py-postfix-dane-policy`](freebsd/mail/py-postfix-dane-policy).
-Until it is in the ports tree you can build it from there with a ports checkout.
+```sh
+sysrc local_unbound_enable=YES
+service local_unbound start
+drill -D posteo.de MX @127.0.0.1 | grep flags   # must show "ad"
+```
 
-Any system with pip:
+If you run Unbound from ports (`dns/unbound`) or in a jail on another address, pass that
+address with `--dns`.
+
+## Installation on FreeBSD
+
+The port lives in [`freebsd/mail/py-postfix-dane-policy`](freebsd/mail/py-postfix-dane-policy)
+until it is part of the ports tree. With a ports checkout in `/usr/ports`:
+
+```sh
+cp -R freebsd/mail/py-postfix-dane-policy /usr/ports/mail/
+cd /usr/ports/mail/py-postfix-dane-policy && make install clean
+```
+
+Other systems (not tested end to end):
 
 ```sh
 pip install git+https://github.com/Kernel-Error/postfix-dane-policy
@@ -58,12 +81,19 @@ pip install git+https://github.com/Kernel-Error/postfix-dane-policy
 
 ## Configuration
 
-Start the service (FreeBSD rc.d script included):
+Enable and start the service. The defaults (`--listen 127.0.0.1 --port 8462 --dns 127.0.0.1`)
+fit `local_unbound`:
 
 ```sh
 sysrc postfix_dane_policy_enable=YES
-sysrc postfix_dane_policy_args="--listen 127.0.0.1 --port 8462 --dns 127.0.0.1"
 service postfix_dane_policy start
+```
+
+Different addresses, e.g. in a jail with Unbound on 127.0.0.3 (IPv6 works too, `--listen ::1`):
+
+```sh
+sysrc postfix_dane_policy_args="--listen 127.0.0.3 --port 8462 --dns 127.0.0.3"
+service postfix_dane_policy restart
 ```
 
 Then in `main.cf` put it in front of the MTA-STS resolver (DANE takes precedence over
@@ -110,6 +140,10 @@ printf '14:dane posteo.de,' | nc 127.0.0.1 8462; echo
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
+
+CI runs the unit tests on Linux (Python 3.10 to 3.14) and, on FreeBSD, builds the port
+from the current tree (`portlint`, `make stage`, `check-plist`, `package`), installs the
+package, starts it via `service` and queries it.
 
 ## License
 

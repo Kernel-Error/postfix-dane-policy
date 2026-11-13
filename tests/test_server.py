@@ -83,6 +83,34 @@ class TcpServerTests(unittest.TestCase):
             self.assertEqual(sock.recv(100), b"")
 
 
+def _ipv6_loopback_available():
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+@unittest.skipUnless(_ipv6_loopback_available(), "no IPv6 loopback")
+class TcpServerIPv6Tests(unittest.TestCase):
+    def test_listen_on_ipv6_loopback(self):
+        server = srv.SocketmapServer(("::1", 0), StaticPolicy({"ex.de": "OK dane-only"}), "dane")
+        self.assertEqual(server.address_family, socket.AF_INET6)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with socket.create_connection(("::1", server.server_address[1]), timeout=5) as sock:
+                sock.sendall(srv.encode_netstring("dane ex.de"))
+                reply = srv.read_netstring(sock.makefile("rb")).decode()
+            self.assertEqual(reply, "OK dane-only")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class CliTests(unittest.TestCase):
     def test_parser_defaults(self):
         args = srv.build_parser().parse_args([])

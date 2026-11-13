@@ -1,13 +1,19 @@
 [
 { type: install
   message: <<EOM
-postfix-dane-policy needs a local DNSSEC-validating resolver (for example
-dns/unbound). It trusts that resolver's AD bit.
+postfix-dane-policy needs a local DNSSEC-validating resolver and trusts its
+AD bit. The base system's local_unbound fits the defaults (127.0.0.1):
+
+  sysrc local_unbound_enable=YES
+  service local_unbound start
 
 Enable the service:
 
   sysrc postfix_dane_policy_enable=YES
   service postfix_dane_policy start
+
+Other addresses (e.g. Unbound from ports in a jail) go into
+postfix_dane_policy_args, see postfix-dane-policy(8).
 
 Then put it first in main.cf, before an MTA-STS resolver if you use one:
 
@@ -18,7 +24,7 @@ Then put it first in main.cf, before an MTA-STS resolver if you use one:
       socketmap:inet:127.0.0.1:8461:mta-sts
 
 Note: "verify" as the global level defers mail to servers without a
-valid CA certificate. See postfix-dane-policy(8).
+valid CA certificate or without STARTTLS.
 EOM
 }
 ]

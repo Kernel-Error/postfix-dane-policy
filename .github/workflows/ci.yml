@@ -32,12 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Test on FreeBSD
+      - name: Build, install and test the port on FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          prepare: pkg install -y python312 py312-dnspython
-          run: |
-            PYTHONPATH=src python3.12 -m unittest discover -s tests -v
-            sh -n rc.d/postfix_dane_policy.in
-            mandoc -T lint man/postfix-dane-policy.8 || true
+          run: sh ci/freebsd-port-test.sh
