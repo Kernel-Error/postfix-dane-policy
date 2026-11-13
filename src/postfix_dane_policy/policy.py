@@ -19,6 +19,7 @@ import dns.exception
 import dns.flags
 import dns.name
 import dns.resolver
+import idna
 
 RESULT_DANE = "dane"
 RESULT_NONE = "none"
@@ -35,7 +36,7 @@ SELFTEST_INTERVAL_BAD = 30
 
 REPLY_RESOLVER_BROKEN = "TEMP resolver does not validate DNSSEC"
 
-_LDH = re.compile(r"^[a-z0-9_-]+(\.[a-z0-9_-]+)+$")
+_LABEL = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
 _UNPRINTABLE = re.compile(r"[^\x20-\x7e]")
 
 log = logging.getLogger("postfix-dane-policy")
@@ -94,17 +95,18 @@ class DnsBackend:
             return DnsAnswer("fail", records=[str(exc)])
         secure = bool(answer.response.flags & dns.flags.AD)
         canonical = answer.canonical_name.to_text(omit_final_dot=True).lower()
+        # expiration covers the whole chain (CNAMEs included), not only the final RRset
+        ttl = max(0, int(getattr(answer, "expiration", time.time()) - time.time()))
         if answer.rrset is None:
-            return DnsAnswer("nodata", secure=secure, canonical=canonical)
+            return DnsAnswer("nodata", secure=secure, ttl=ttl, canonical=canonical)
         if rdtype == "MX":
             records = [(r.preference, r.exchange.to_text(omit_final_dot=True).lower())
                        for r in answer.rrset]
         elif rdtype == "TLSA":
-            records = [(r.usage, r.selector, r.mtype, len(r.cert)) for r in answer.rrset]
+            records = [(r.usage, r.selector, r.mtype, bytes(r.cert)) for r in answer.rrset]
         else:
             records = [r.to_text() for r in answer.rrset]
-        return DnsAnswer("ok", records=records, secure=secure, ttl=answer.rrset.ttl,
-                         canonical=canonical)
+        return DnsAnswer("ok", records=records, secure=secure, ttl=ttl, canonical=canonical)
 
 
 def normalize_key(key):
@@ -112,10 +114,14 @@ def normalize_key(key):
 
     Postfix also queries parent domains with a leading dot and bracketed
     next-hops ([host]:port); those are answered with NOTFOUND. Non-ASCII
-    keys are converted with IDNA 2008 / UTS#46, like Postfix does.
+    keys are converted with IDNA 2008 / UTS#46, like Postfix does. Every
+    label must be a valid host name label (underscore is tolerated), A-labels
+    must decode as IDNA 2008.
     """
-    key = key.strip().rstrip(".")
-    if not key or key[0] in ".[" or ":" in key:
+    key = key.strip()
+    if key.endswith("."):
+        key = key[:-1]
+    if not key or key[0] in ".[" or key.endswith(".") or ":" in key:
         return None
     if not key.isascii():
         try:
@@ -124,10 +130,19 @@ def normalize_key(key):
         except Exception:  # invalid IDN or idna package missing
             return None
     key = key.lower()
-    if len(key) > 253 or not _LDH.match(key):
+    if len(key) > 253:
         return None
-    if any(len(label) > 63 for label in key.split(".")):
+    labels = key.split(".")
+    if len(labels) < 2:
         return None
+    for label in labels:
+        if not _LABEL.match(label):
+            return None
+        if label.startswith("xn--"):
+            try:
+                idna.decode(label)
+            except idna.IDNAError:
+                return None
     return key
 
 
@@ -136,44 +151,63 @@ def normalize_key(key):
 _DIGEST_LEN = {1: 32, 2: 64}
 
 
+def _der_sequence(data):
+    """Minimal DER sanity check: one complete SEQUENCE covering all bytes."""
+    if len(data) < 2 or data[0] != 0x30:
+        return False
+    first = data[1]
+    if first < 0x80:
+        return 2 + first == len(data)
+    count = first & 0x7F
+    if count == 0 or count > 4 or len(data) < 2 + count:
+        return False
+    return 2 + count + int.from_bytes(data[2:2 + count], "big") == len(data)
+
+
 def tlsa_usable(record):
-    """True if a TLSA record (usage, selector, mtype, data_len) is usable for SMTP."""
+    """True if a TLSA record (usage, selector, mtype, data) is usable for SMTP."""
     try:
-        usage, selector, mtype, data_len = record
+        usage, selector, mtype, data = record
+        data = bytes(data)
     except (TypeError, ValueError):
         return False
     if usage not in (2, 3) or selector not in (0, 1) or mtype not in (0, 1, 2):
         return False
     if mtype == 0:
-        return data_len > 0
-    return data_len == _DIGEST_LEN[mtype]
+        # full certificate (selector 0) or SubjectPublicKeyInfo (selector 1), both DER
+        return _der_sequence(data)
+    return len(data) == _DIGEST_LEN[mtype]
 
 
 def _tlsa_for_host(host, query):
     """Return (found, failed, ttl) for one MX host, following a secure CNAME.
 
-    RFC 7672 section 2.2.2: if the MX host name is a DNSSEC-validated alias,
-    TLSA records are looked up at the fully expanded name first and then at
-    the original name. Only RRsets with at least one usable record count:
-    with dane-only Postfix refuses hosts whose TLSA records are all unusable,
-    so such hosts are better left to MTA-STS / verify.
+    Mirrors Postfix (tls_dane.c) and RFC 7672 sections 2.2.2/2.2.3: if the MX
+    host name is a DNSSEC-validated alias, TLSA is looked up at the fully
+    expanded name first, then at the original name. The first *secure* TLSA
+    RRset decides; insecure or nonexistent RRsets move on to the next name,
+    a lookup failure stops (Postfix would defer that host). A selected RRset
+    without any usable record means "no usable TLSA" for this host, because
+    with dane-only Postfix refuses such hosts.
     """
     candidates = [host]
+    chain_ttls = []
     addr = query(host, "A")
     addr_failed = addr.status == "fail"
     if (addr.status in ("ok", "nodata") and addr.secure
             and addr.canonical and addr.canonical != host):
         candidates = [addr.canonical, host]
+        chain_ttls.append(addr.ttl)
 
-    failed = addr_failed
     for name in candidates:
         tlsa = query("_25._tcp." + name, "TLSA")
         if tlsa.status == "fail":
-            failed = True
-        elif (tlsa.status == "ok" and tlsa.secure
-              and any(tlsa_usable(r) for r in tlsa.records)):
-            return True, False, tlsa.ttl
-    return False, failed, 0
+            return False, True, 0
+        if tlsa.status == "ok" and tlsa.secure and tlsa.records:
+            if any(tlsa_usable(r) for r in tlsa.records):
+                return True, False, min([tlsa.ttl] + chain_ttls)
+            return False, False, 0
+    return False, addr_failed, 0
 
 
 def decide(domain, backend, deadline=None):
@@ -316,7 +350,7 @@ class _Inflight:
 class Policy:
     def __init__(self, backend, cache=None, health=None, budget=DEFAULT_LOOKUP_BUDGET):
         self.backend = backend
-        self.cache = cache or PolicyCache()
+        self.cache = cache if cache is not None else PolicyCache()
         self.health = health
         self.budget = budget
         self._lock = threading.Lock()
