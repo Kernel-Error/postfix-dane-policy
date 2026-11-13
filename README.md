@@ -36,6 +36,11 @@ Details:
   name is a DNSSEC-validated alias, TLSA is looked up at the expanded name first, then at the
   original name.
 - **No MX record** means the domain itself is checked as the implicit MX.
+- **Only usable TLSA counts:** DANE-TA(2)/DANE-EE(3), selector 0/1, matching type 0/1/2 with the
+  right digest length (RFC 7672 section 3.1). A host that publishes only unusable records
+  (e.g. PKIX-TA/PKIX-EE usages 0/1) is treated as having no TLSA, because with `dane-only`
+  Postfix would refuse it entirely. RFC 7672 would fall back to unauthenticated `encrypt`
+  there; this service lets MTA-STS or `verify` decide instead, which is stricter.
 - **Mixed MX sets** (some hosts with TLSA, some without) still get `dane-only`. Postfix then
   delivers only to hosts it can authenticate via DANE and defers if none works. That is
   fail-closed on purpose: never a fallback to unauthenticated TLS.
@@ -127,7 +132,25 @@ smtp_dns_support_level = dnssec
 smtp_tls_policy_maps =
     socketmap:unix:/var/run/postfix_dane_policy/policy.sock:dane,
     socketmap:inet:127.0.0.1:8461:mta-sts
+# verify and MTA-STS need a CA trust store (pkg install ca_root_nss)
+smtp_tls_CAfile = /usr/local/share/certs/ca-root-nss.crt
+# "TLS-Required: no" (RFC 8689) would let a sender switch off the whole policy
+tls_required_enable = no
+# verify, secure and dane-only use the *mandatory* protocol setting
+smtp_tls_mandatory_protocols = >=TLSv1.2
 ```
+
+Why the extra lines matter:
+
+- `smtp_tls_CAfile`/`smtp_tls_CApath` are empty by default. Without a trust store `verify` and
+  MTA-STS `secure` can't verify anything and every such delivery is deferred.
+- `tls_required_enable` defaults to `yes` since Postfix 3.10. A message with the header
+  `TLS-Required: no` then skips the policy lookup and is sent with level `may`, including the
+  plaintext fallback. "Never plaintext" only holds with `tls_required_enable = no`.
+- `smtp_tls_protocols` only applies to opportunistic TLS (`may`). For `verify`, `secure` and
+  `dane-only` Postfix uses `smtp_tls_mandatory_protocols` (default `>=TLSv1`). Trade-off from
+  postconf(5): "If you use dane or dane-only it is best not to disable TLSv1" -- a few DANE
+  servers only speak TLS 1.0, `>=TLSv1.2` makes those unreachable.
 
 TCP is still possible (`--listen 127.0.0.1 --port 8462`, or `::1`) but not recommended: any
 local process could grab the port while the service restarts. Non-loopback addresses are
@@ -156,9 +179,12 @@ create the user yourself: `pw groupadd danepolicy -g 801 && pw useradd danepolic
 ## Things to know before you switch to `verify`
 
 - Mail to servers without a valid CA certificate (self-signed, expired, wrong name) and
-  to servers without STARTTLS gets deferred and eventually bounces. Check your logs
-  first: `grep -E "(Untrusted|Anonymous) TLS connection" /var/log/maillog` and
-  deliveries with `tls=...:none`.
+  to servers without STARTTLS gets deferred and eventually bounces. As a first pass look
+  at your outbound history: `grep "postfix/smtp\[" /var/log/maillog | grep -E
+  "(Untrusted|Anonymous) TLS connection|tls=[a-z]*:none"`. That's only a pre-selection:
+  "Trusted" connections can still fail the hostname check of `verify`. The real test is a
+  probe with the new settings: `sendmail -bv someone@example.org` and look for
+  `tls=verify`/`tls=!verify` in the log.
 - `verify` checks the certificate against the MX hostname. Without DNSSEC on the
   recipient's MX lookup the MX hostname itself can be spoofed. That is a limit of
   `verify`, MTA-STS and DANE close it.

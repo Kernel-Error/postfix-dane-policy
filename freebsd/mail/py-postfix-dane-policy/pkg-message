@@ -24,6 +24,12 @@ Then put it first in main.cf, before an MTA-STS resolver if you use one:
   smtp_tls_policy_maps =
       socketmap:unix:/var/run/postfix_dane_policy/policy.sock:dane,
       socketmap:inet:127.0.0.1:8461:mta-sts
+  smtp_tls_CAfile = /usr/local/share/certs/ca-root-nss.crt
+  tls_required_enable = no
+  smtp_tls_mandatory_protocols = >=TLSv1.2
+
+tls_required_enable = no stops senders from disabling the policy with a
+"TLS-Required: no" header. verify/dane-only use the mandatory protocols.
 
 Note: "verify" as the global level defers mail to servers without a
 valid CA certificate or without STARTTLS.

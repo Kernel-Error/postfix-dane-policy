@@ -24,8 +24,9 @@ answers Postfix
 .Va smtp_tls_policy_maps
 lookups via the socketmap protocol.
 For a next-hop domain whose MX RRset is DNSSEC-validated and where at
-least one MX host publishes a DNSSEC-validated TLSA RRset for port 25,
-it returns
+least one MX host publishes a DNSSEC-validated TLSA RRset for port 25
+with at least one usable record (usage 2 or 3, selector 0 or 1,
+matching type 0, 1 or 2), it returns
 .Dq dane-only .
 MX host names that are DNSSEC-validated aliases are expanded first, as
 described in RFC 7672 section 2.2.2.
@@ -113,7 +114,17 @@ smtp_dns_support_level = dnssec
 smtp_tls_policy_maps =
     socketmap:unix:/var/run/postfix_dane_policy/policy.sock:dane,
     socketmap:inet:127.0.0.1:8461:mta-sts
+smtp_tls_CAfile = /usr/local/share/certs/ca-root-nss.crt
+tls_required_enable = no
+smtp_tls_mandatory_protocols = >=TLSv1.2
 .Ed
+.Pp
+.Va tls_required_enable
+must be
+.Dq no ,
+otherwise a sender can disable the policy with a
+.Dq TLS-Required: no
+header (RFC 8689).
 .Pp
 .Pa rc.conf :
 .Bd -literal -offset indent
