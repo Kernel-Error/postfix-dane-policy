@@ -62,7 +62,7 @@ Start the service (FreeBSD rc.d script included):
 
 ```sh
 sysrc postfix_dane_policy_enable=YES
-sysrc postfix_dane_policy_flags="--listen 127.0.0.1 --port 8462 --dns 127.0.0.1"
+sysrc postfix_dane_policy_args="--listen 127.0.0.1 --port 8462 --dns 127.0.0.1"
 service postfix_dane_policy start
 ```
 

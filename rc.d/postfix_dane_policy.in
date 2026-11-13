@@ -11,7 +11,7 @@
 #					Default: NO
 # postfix_dane_policy_user (str):	Run as this user.
 #					Default: nobody
-# postfix_dane_policy_flags (str):	Arguments for postfix-dane-policy.
+# postfix_dane_policy_args (str):	Arguments for postfix-dane-policy.
 #					Default: --listen 127.0.0.1 --port 8462 --dns 127.0.0.1
 
 . /etc/rc.subr
@@ -23,11 +23,20 @@ load_rc_config $name
 
 : ${postfix_dane_policy_enable:="NO"}
 : ${postfix_dane_policy_user:="nobody"}
-: ${postfix_dane_policy_flags:="--listen 127.0.0.1 --port 8462 --dns 127.0.0.1"}
+: ${postfix_dane_policy_args:="--listen 127.0.0.1 --port 8462 --dns 127.0.0.1"}
 
-pidfile="/var/run/${name}.pid"
+rundir="/var/run/${name}"
+pidfile="${rundir}/${name}.pid"
 procname="/usr/sbin/daemon"
 command="/usr/sbin/daemon"
-command_args="-f -r -P ${pidfile} -u ${postfix_dane_policy_user} -T postfix-dane-policy %%PREFIX%%/bin/postfix-dane-policy"
+command_args="-f -r -P ${pidfile} -T postfix-dane-policy %%PREFIX%%/bin/postfix-dane-policy ${postfix_dane_policy_args}"
+start_precmd="${name}_prestart"
+
+# rc.subr already runs daemon(8) as ${name}_user (via su), so daemon
+# itself must not get -u. The pidfile is written as that user.
+postfix_dane_policy_prestart()
+{
+	install -d -o "${postfix_dane_policy_user}" -m 0755 "${rundir}"
+}
 
 run_rc_command "$1"
