@@ -21,6 +21,7 @@ USE_GITHUB=	yes
 GH_ACCOUNT=	Kernel-Error
 USE_PYTHON=	autoplist pep517
 USE_RC_SUBR=	postfix_dane_policy
+SUB_FILES=	pkg-message
 
 USERS=		danepolicy
 GROUPS=		danepolicy
