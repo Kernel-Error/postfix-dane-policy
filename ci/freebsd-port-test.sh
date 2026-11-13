@@ -11,7 +11,7 @@ PY=3.12
 
 echo "==> version ${VERSION}"
 
-echo "DEFAULT_VERSIONS+=python=${PY} python3=${PY}" >> /etc/make.conf
+printf "DEFAULT_VERSIONS+=python=${PY} python3=${PY}\nDEVELOPER=yes\n" >> /etc/make.conf
 pkg install -y git-tiny portlint python312 py312-dnspython py312-setuptools \
 	py312-wheel py312-build py312-installer
 
@@ -33,6 +33,9 @@ cp -R "${SRC}/freebsd/${PORT}" "/usr/ports/${PORT}"
 cd "/usr/ports/${PORT}"
 sed -i '' "s/^DISTVERSION=.*/DISTVERSION=	${VERSION}/" Makefile
 make makesum
+make clean
+# portlint -C (committer mode) expects the port to be tracked by git
+git -C /usr/ports add "${PORT}"
 
 echo "==> portlint"
 portlint -AC
