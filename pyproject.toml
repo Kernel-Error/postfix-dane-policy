@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Communications :: Email :: Mail Transport Agents",
     "Topic :: Security",
 ]
-dependencies = ["dnspython>=2.0"]
+dependencies = ["dnspython>=2.6.1", "idna>=3"]
 
 [project.urls]
 Homepage = "https://github.com/Kernel-Error/postfix-dane-policy"
