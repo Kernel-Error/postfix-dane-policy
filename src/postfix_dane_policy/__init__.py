@@ -1,0 +1,3 @@
+"""DANE-aware TLS policy socketmap service for Postfix."""
+
+__version__ = "0.1.0"

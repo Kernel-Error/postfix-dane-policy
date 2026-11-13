@@ -1,0 +1,91 @@
+.Dd November 13, 2026
+.Dt POSTFIX-DANE-POLICY 8
+.Os
+.Sh NAME
+.Nm postfix-dane-policy
+.Nd DANE-aware TLS policy socketmap service for Postfix
+.Sh SYNOPSIS
+.Nm
+.Op Fl -listen Ar address
+.Op Fl -port Ar port
+.Op Fl -dns Ar address
+.Op Fl -dns-port Ar port
+.Op Fl -timeout Ar seconds
+.Op Fl -mapname Ar name
+.Op Fl -log Cm syslog | stderr
+.Op Fl -version
+.Sh DESCRIPTION
+.Nm
+answers Postfix
+.Va smtp_tls_policy_maps
+lookups via the
+.Xr postfix 1
+socketmap protocol.
+For a next-hop domain whose MX RRset is DNSSEC-validated and where at
+least one MX host publishes a DNSSEC-validated TLSA RRset for port 25,
+it returns
+.Dq dane-only .
+For every other domain it returns NOTFOUND, so the next policy map
+(for example an MTA-STS resolver) or the global
+.Va smtp_tls_security_level
+applies.
+DNS failures, including DNSSEC validation failures, return TEMP and
+Postfix defers the delivery instead of downgrading.
+.Pp
+Combined with
+.Va smtp_tls_security_level = verify
+this gives the policy
+.Dq DANE if published, else MTA-STS, else a CA-verified certificate,
+never plaintext.
+.Pp
+The service trusts the AD bit of the configured resolver and does not
+validate DNSSEC itself.
+The resolver must be a local, validating resolver such as
+.Xr unbound 8 .
+.Sh OPTIONS
+.Bl -tag -width indent
+.It Fl -listen Ar address
+Listen address.
+Default: 127.0.0.1.
+.It Fl -port Ar port
+Listen port.
+Default: 8462.
+.It Fl -dns Ar address
+Validating DNS resolver.
+Default: 127.0.0.1.
+.It Fl -dns-port Ar port
+Resolver port.
+Default: 53.
+.It Fl -timeout Ar seconds
+DNS timeout.
+Default: 5.
+.It Fl -mapname Ar name
+Socketmap name expected in requests.
+Default: dane.
+.It Fl -log Cm syslog | stderr
+Log destination.
+Syslog uses the mail facility.
+Default: syslog.
+.El
+.Sh EXAMPLES
+.Pa main.cf :
+.Bd -literal -offset indent
+smtp_tls_security_level = verify
+smtp_dns_support_level = dnssec
+smtp_tls_policy_maps =
+    socketmap:inet:127.0.0.1:8462:dane,
+    socketmap:inet:127.0.0.1:8461:mta-sts
+.Ed
+.Pp
+.Pa rc.conf :
+.Bd -literal -offset indent
+postfix_dane_policy_enable="YES"
+.Ed
+.Sh SEE ALSO
+.Xr postconf 5 ,
+.Xr unbound 8
+.Rs
+.%T RFC 7672: SMTP Security via Opportunistic DANE TLS
+.Re
+.Sh AUTHORS
+.An Sebastian van de Meer Aq Mt kernel-error@kernel-error.com

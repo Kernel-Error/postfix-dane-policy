@@ -1,0 +1,24 @@
+[
+{ type: install
+  message: <<EOM
+postfix-dane-policy needs a local DNSSEC-validating resolver (for example
+dns/unbound). It trusts that resolver's AD bit.
+
+Enable the service:
+
+  sysrc postfix_dane_policy_enable=YES
+  service postfix_dane_policy start
+
+Then put it first in main.cf, before an MTA-STS resolver if you use one:
+
+  smtp_tls_security_level = verify
+  smtp_dns_support_level = dnssec
+  smtp_tls_policy_maps =
+      socketmap:inet:127.0.0.1:8462:dane,
+      socketmap:inet:127.0.0.1:8461:mta-sts
+
+Note: "verify" as the global level defers mail to servers without a
+valid CA certificate. See postfix-dane-policy(8).
+EOM
+}
+]

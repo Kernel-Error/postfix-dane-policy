@@ -1,0 +1,9 @@
+postfix-dane-policy is a small socketmap service for Postfix
+smtp_tls_policy_maps. It answers "dane-only" for next-hop domains whose
+MX records and MX host TLSA records are DNSSEC-validated, and NOTFOUND
+otherwise, so an MTA-STS resolver or the global TLS security level
+applies next. DNS failures make Postfix defer instead of downgrading.
+
+Together with smtp_tls_security_level = verify this gives the outbound
+policy "DANE if published, else MTA-STS, else a CA-verified certificate,
+never plaintext".
