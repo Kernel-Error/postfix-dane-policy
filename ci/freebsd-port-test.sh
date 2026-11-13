@@ -30,8 +30,16 @@ if ! grep -q '^danepolicy:' /usr/ports/UIDs; then
 		echo "UID/GID ${SVC_UID} is taken in the ports tree, pick another one"
 		exit 1
 	fi
-	echo "danepolicy:*:${SVC_UID}:${SVC_UID}::0:0:postfix-dane-policy:/nonexistent:/usr/sbin/nologin" >> /usr/ports/UIDs
-	echo "danepolicy:*:${SVC_UID}:" >> /usr/ports/GIDs
+	# insert in UID/GID order, as portlint expects
+	insert_sorted() {
+		awk -v line="$2" -v id="${SVC_UID}" -F: '
+			!done && $0 !~ /^#/ && $3 + 0 > id { print line; done = 1 }
+			{ print }
+			END { if (!done) print line }' "$1" > "$1.new" && mv "$1.new" "$1"
+	}
+	insert_sorted /usr/ports/UIDs "danepolicy:*:${SVC_UID}:${SVC_UID}::0:0:postfix-dane-policy:/nonexistent:/usr/sbin/nologin"
+	insert_sorted /usr/ports/GIDs "danepolicy:*:${SVC_UID}:"
+	grep -n '^danepolicy:' /usr/ports/UIDs /usr/ports/GIDs
 fi
 
 echo "==> distfile from the working tree, named like the GitHub tarball"
