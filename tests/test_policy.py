@@ -22,8 +22,8 @@ def mx(*hosts, secure=True, ttl=3600):
                         secure=secure, ttl=ttl)
 
 
-def tlsa(secure=True, ttl=1800):
-    return dp.DnsAnswer("ok", records=["3 1 1 AABB"], secure=secure, ttl=ttl)
+def tlsa(secure=True, ttl=1800, records=((3, 1, 1, 32),)):
+    return dp.DnsAnswer("ok", records=list(records), secure=secure, ttl=ttl)
 
 
 def addr(canonical, secure=True):
@@ -101,6 +101,40 @@ class DecideTests(unittest.TestCase):
         b = FakeBackend({("ex.de", "MX"): mx("mx1.ex.de", ttl=86400),
                          ("_25._tcp.mx1.ex.de", "TLSA"): tlsa(ttl=86400)})
         self.assertEqual(dp.decide("ex.de", b)[1], dp.POSITIVE_TTL_MAX)
+
+
+class TlsaUsabilityTests(unittest.TestCase):
+    """dane-only with only unusable TLSA makes Postfix refuse the host (postconf(5))."""
+
+    def test_usable_records(self):
+        for rec in [(3, 1, 1, 32), (3, 0, 1, 32), (2, 1, 1, 32), (3, 1, 2, 64),
+                    (2, 0, 0, 900), (3, 1, 0, 91)]:
+            self.assertTrue(dp.tlsa_usable(rec), rec)
+
+    def test_unusable_records(self):
+        for rec in [(0, 1, 1, 32), (1, 1, 1, 32), (255, 1, 1, 32), (4, 1, 1, 32),
+                    (3, 2, 1, 32), (3, 1, 3, 32), (3, 1, 1, 31), (3, 1, 2, 32),
+                    (3, 1, 0, 0), "3 1 1 AABB", (3, 1), None]:
+            self.assertFalse(dp.tlsa_usable(rec), rec)
+
+    def test_only_unusable_tlsa_is_none(self):
+        b = FakeBackend({("ex.de", "MX"): mx("mx1.ex.de"),
+                         ("_25._tcp.mx1.ex.de", "TLSA"): tlsa(records=[(1, 1, 1, 32), (255, 1, 1, 32)])})
+        result, _, reason = dp.decide("ex.de", b)
+        self.assertEqual(result, dp.RESULT_NONE)
+        self.assertEqual(reason, "no secure TLSA")
+
+    def test_one_usable_record_is_enough(self):
+        b = FakeBackend({("ex.de", "MX"): mx("mx1.ex.de"),
+                         ("_25._tcp.mx1.ex.de", "TLSA"): tlsa(records=[(0, 0, 1, 32), (3, 1, 1, 32)])})
+        self.assertEqual(dp.decide("ex.de", b)[0], dp.RESULT_DANE)
+
+    def test_unusable_at_cname_target_falls_back_to_original(self):
+        b = FakeBackend({("ex.de", "MX"): mx("mx.ex.de"),
+                         ("mx.ex.de", "A"): addr("mx.provider.net"),
+                         ("_25._tcp.mx.provider.net", "TLSA"): tlsa(records=[(1, 1, 1, 32)]),
+                         ("_25._tcp.mx.ex.de", "TLSA"): tlsa()})
+        self.assertEqual(dp.decide("ex.de", b)[0], dp.RESULT_DANE)
 
 
 class CnameTests(unittest.TestCase):

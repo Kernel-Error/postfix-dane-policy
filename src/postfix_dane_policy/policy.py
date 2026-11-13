@@ -99,6 +99,8 @@ class DnsBackend:
         if rdtype == "MX":
             records = [(r.preference, r.exchange.to_text(omit_final_dot=True).lower())
                        for r in answer.rrset]
+        elif rdtype == "TLSA":
+            records = [(r.usage, r.selector, r.mtype, len(r.cert)) for r in answer.rrset]
         else:
             records = [r.to_text() for r in answer.rrset]
         return DnsAnswer("ok", records=records, secure=secure, ttl=answer.rrset.ttl,
@@ -129,12 +131,32 @@ def normalize_key(key):
     return key
 
 
+# RFC 7672 section 3.1: for SMTP only DANE-TA(2) and DANE-EE(3) are usable;
+# selector Cert(0)/SPKI(1); matching type Full(0), SHA2-256(1), SHA2-512(2).
+_DIGEST_LEN = {1: 32, 2: 64}
+
+
+def tlsa_usable(record):
+    """True if a TLSA record (usage, selector, mtype, data_len) is usable for SMTP."""
+    try:
+        usage, selector, mtype, data_len = record
+    except (TypeError, ValueError):
+        return False
+    if usage not in (2, 3) or selector not in (0, 1) or mtype not in (0, 1, 2):
+        return False
+    if mtype == 0:
+        return data_len > 0
+    return data_len == _DIGEST_LEN[mtype]
+
+
 def _tlsa_for_host(host, query):
     """Return (found, failed, ttl) for one MX host, following a secure CNAME.
 
     RFC 7672 section 2.2.2: if the MX host name is a DNSSEC-validated alias,
     TLSA records are looked up at the fully expanded name first and then at
-    the original name.
+    the original name. Only RRsets with at least one usable record count:
+    with dane-only Postfix refuses hosts whose TLSA records are all unusable,
+    so such hosts are better left to MTA-STS / verify.
     """
     candidates = [host]
     addr = query(host, "A")
@@ -148,7 +170,8 @@ def _tlsa_for_host(host, query):
         tlsa = query("_25._tcp." + name, "TLSA")
         if tlsa.status == "fail":
             failed = True
-        elif tlsa.status == "ok" and tlsa.secure and tlsa.records:
+        elif (tlsa.status == "ok" and tlsa.secure
+              and any(tlsa_usable(r) for r in tlsa.records)):
             return True, False, tlsa.ttl
     return False, failed, 0
 
