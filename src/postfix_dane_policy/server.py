@@ -1,17 +1,25 @@
 """Postfix socketmap protocol server and command line entry point."""
 
 import argparse
+import ipaddress
 import logging
 import logging.handlers
 import os
+import signal
 import socket
 import socketserver
+import stat
 import sys
+import threading
+import time
 
 from . import __version__
-from .policy import DnsBackend, Policy, log
+from .policy import (DEFAULT_LOOKUP_BUDGET, DnsBackend, Policy, ResolverHealth, log)
 
 MAX_NETSTRING = 10000
+IDLE_TIMEOUT = 300.0      # wait for the first byte of the next request
+REQUEST_TIMEOUT = 10.0    # a started request must be complete within this time
+DEFAULT_MAX_CONNECTIONS = 64
 
 
 def encode_netstring(text):
@@ -19,11 +27,25 @@ def encode_netstring(text):
     return str(len(data)).encode("ascii") + b":" + data + b","
 
 
-def read_netstring(rfile):
-    """Read one netstring; return bytes, or None on clean EOF."""
+def _read(rfile, size, sock, deadline):
+    if sock is not None and deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("request timeout")
+        sock.settimeout(remaining)
+    return rfile.read(size)
+
+
+def read_netstring(rfile, sock=None, deadline=None, first=b""):
+    """Read one netstring; return bytes, or None on clean EOF.
+
+    With sock and deadline the whole netstring has to arrive before the
+    deadline (protection against slow senders).
+    """
     length = b""
     while True:
-        ch = rfile.read(1)
+        ch = first if first else _read(rfile, 1, sock, deadline)
+        first = b""
         if not ch:
             if length:
                 raise ValueError("truncated netstring length")
@@ -38,8 +60,13 @@ def read_netstring(rfile):
     size = int(length)
     if size > MAX_NETSTRING:
         raise ValueError("netstring too long")
-    data = rfile.read(size)
-    if len(data) != size or rfile.read(1) != b",":
+    data = b""
+    while len(data) < size:
+        chunk = _read(rfile, size - len(data), sock, deadline)
+        if not chunk:
+            raise ValueError("truncated netstring")
+        data += chunk
+    if _read(rfile, 1, sock, deadline) != b",":
         raise ValueError("truncated netstring")
     return data
 
@@ -52,41 +79,113 @@ def handle_request(policy, mapname, data):
         return "PERM invalid encoding"
     name, _, key = text.partition(" ")
     if name != mapname:
-        return "PERM unknown map %s" % name[:50]
+        return "PERM unknown map"
     try:
         return policy.lookup(key)
-    except Exception as exc:  # never crash the connection on one bad lookup
+    except Exception:  # never crash the connection on one bad lookup
         log.exception("lookup failed for %r", key)
-        return "TEMP internal error: %s" % str(exc)[:100]
+        return "TEMP internal error"
 
 
 class SocketmapHandler(socketserver.StreamRequestHandler):
-    timeout = 300
+    def setup(self):
+        self.timeout = self.server.idle_timeout
+        super().setup()
 
     def handle(self):
+        sock = self.connection
         while True:
             try:
-                data = read_netstring(self.rfile)
+                sock.settimeout(self.server.idle_timeout)
+                first = self.rfile.read(1)
+                if not first:
+                    return
+                deadline = time.monotonic() + self.server.request_timeout
+                data = read_netstring(self.rfile, sock=sock, deadline=deadline, first=first)
             except (ValueError, OSError) as exc:
-                log.warning("protocol error from %s: %s", self.client_address, exc)
+                log.warning("protocol error from %r: %s", self.client_address, exc)
                 return
             if data is None:
                 return
             reply = handle_request(self.server.policy, self.server.mapname, data)
-            self.wfile.write(encode_netstring(reply))
-            self.wfile.flush()
+            try:
+                self.wfile.write(encode_netstring(reply))
+                self.wfile.flush()
+            except OSError:
+                return
 
 
-class SocketmapServer(socketserver.ThreadingTCPServer):
+class _SocketmapServerMixin:
     daemon_threads = True
-    allow_reuse_address = True
 
-    def __init__(self, address, policy, mapname):
-        # IPv6 literal (e.g. "::1") -> AF_INET6, everything else stays AF_INET
-        self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
-        super().__init__(address, SocketmapHandler)
+    def _init_socketmap(self, policy, mapname, max_connections):
         self.policy = policy
         self.mapname = mapname
+        self.max_connections = max_connections
+        self.idle_timeout = IDLE_TIMEOUT
+        self.request_timeout = REQUEST_TIMEOUT
+        self._active = 0
+        self._active_lock = threading.Lock()
+
+    def process_request(self, request, client_address):
+        with self._active_lock:
+            refuse = self._active >= self.max_connections
+            if not refuse:
+                self._active += 1
+        if refuse:
+            log.warning("connection limit (%d) reached, refusing connection", self.max_connections)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            with self._active_lock:
+                self._active -= 1
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with self._active_lock:
+                self._active -= 1
+
+
+class SocketmapServer(_SocketmapServerMixin, socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+    def __init__(self, address, policy, mapname, max_connections=DEFAULT_MAX_CONNECTIONS):
+        # IPv6 literal (e.g. "::1") -> AF_INET6, everything else stays AF_INET
+        self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
+        self._init_socketmap(policy, mapname, max_connections)
+        super().__init__(address, SocketmapHandler)
+
+
+class UnixSocketmapServer(_SocketmapServerMixin, socketserver.ThreadingUnixStreamServer):
+    def __init__(self, path, policy, mapname, max_connections=DEFAULT_MAX_CONNECTIONS):
+        self._init_socketmap(policy, mapname, max_connections)
+        self.socket_path = path
+        if os.path.lexists(path):
+            if not stat.S_ISSOCK(os.lstat(path).st_mode):
+                raise RuntimeError("%s exists and is not a socket" % path)
+            os.unlink(path)
+        super().__init__(path, SocketmapHandler)
+        # Access is controlled by the permissions of the containing directory.
+        os.chmod(path, 0o666)
+
+    def server_close(self):
+        super().server_close()
+        try:
+            os.unlink(self.socket_path)
+        except OSError:
+            pass
+
+
+def is_loopback(address):
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except ValueError:
+        return False
 
 
 def _syslog_address():
@@ -100,21 +199,42 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="postfix-dane-policy",
         description="DANE-aware TLS policy socketmap service for Postfix")
+    parser.add_argument("--socket", metavar="PATH",
+                        help="listen on this unix socket instead of TCP (recommended)")
     parser.add_argument("--listen", default="127.0.0.1",
-                        help="listen address, IPv4 or IPv6 (default 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8462, help="listen port (default 8462)")
+                        help="TCP listen address, IPv4 or IPv6 loopback (default 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8462, help="TCP listen port (default 8462)")
+    parser.add_argument("--allow-remote", action="store_true",
+                        help="allow a non-loopback --listen address (not recommended)")
     parser.add_argument("--dns", default="127.0.0.1",
                         help="validating DNS resolver address (default 127.0.0.1)")
     parser.add_argument("--dns-port", type=int, default=53)
-    parser.add_argument("--timeout", type=float, default=5.0, help="DNS timeout in seconds")
+    parser.add_argument("--timeout", type=float, default=5.0, help="DNS timeout per query in seconds")
+    parser.add_argument("--lookup-budget", type=float, default=DEFAULT_LOOKUP_BUDGET,
+                        help="total time budget per policy lookup in seconds (default 20)")
+    parser.add_argument("--max-connections", type=int, default=DEFAULT_MAX_CONNECTIONS,
+                        help="maximum concurrent client connections (default 64)")
     parser.add_argument("--mapname", default="dane", help="socketmap name (default dane)")
     parser.add_argument("--log", choices=("syslog", "stderr"), default="syslog")
     parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
     return parser
 
 
+def parse_args(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.socket and not args.allow_remote and not is_loopback(args.listen):
+        parser.error("--listen %s is not a loopback address; use --socket, a loopback "
+                     "address or --allow-remote" % args.listen)
+    if args.max_connections < 1:
+        parser.error("--max-connections must be at least 1")
+    if args.lookup_budget <= 0:
+        parser.error("--lookup-budget must be positive")
+    return args
+
+
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    args = parse_args(argv)
     if args.log == "stderr":
         handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(logging.Formatter("%(asctime)s postfix-dane-policy: %(message)s"))
@@ -125,12 +245,27 @@ def main(argv=None):
     log.addHandler(handler)
     log.setLevel(logging.INFO)
 
-    policy = Policy(DnsBackend(args.dns, args.dns_port, args.timeout))
-    server = SocketmapServer((args.listen, args.port), policy, args.mapname)
-    log.info("version %s listening on %s:%d map=%s dns=%s",
-             __version__, args.listen, args.port, args.mapname, args.dns)
+    backend = DnsBackend(args.dns, args.dns_port, args.timeout)
+    health = ResolverHealth(backend)
+    health.check()
+    policy = Policy(backend, health=health, budget=args.lookup_budget)
+
+    if args.socket:
+        server = UnixSocketmapServer(args.socket, policy, args.mapname, args.max_connections)
+        where = "unix:%s" % args.socket
+    else:
+        server = SocketmapServer((args.listen, args.port), policy, args.mapname,
+                                 args.max_connections)
+        where = "%s:%d" % (args.listen, args.port)
+    log.info("version %s listening on %s map=%s dns=%s", __version__, where, args.mapname, args.dns)
+    # SIGTERM (service stop, daemon(8)) -> leave serve_forever cleanly so the
+    # unix socket is removed in server_close().
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
+    finally:
+        server.server_close()
+        log.info("stopped")
     return 0
