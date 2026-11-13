@@ -7,7 +7,7 @@ name = "postfix-dane-policy"
 dynamic = ["version"]
 description = "DANE-aware TLS policy socketmap service for Postfix"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Sebastian van de Meer", email = "kernel-error@kernel-error.com" }]
 keywords = ["postfix", "dane", "tlsa", "dnssec", "smtp", "tls", "mta-sts"]

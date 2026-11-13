@@ -39,7 +39,7 @@ rather than falling back to unauthenticated TLS.
 
 ## Requirements
 
-- Python 3.9 or newer, [dnspython](https://www.dnspython.org/) 2.x
+- Python 3.10 or newer, [dnspython](https://www.dnspython.org/) 2.x
 - A **local, DNSSEC-validating resolver** such as Unbound. The service trusts the AD bit
   of that resolver and does not validate on its own. Don't point it at a remote resolver
   over an untrusted network.

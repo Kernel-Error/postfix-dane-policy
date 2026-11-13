@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,8 +36,8 @@ jobs:
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          prepare: pkg install -y python311 py311-dnspython
+          prepare: pkg install -y python312 py312-dnspython
           run: |
-            PYTHONPATH=src python3.11 -m unittest discover -s tests -v
+            PYTHONPATH=src python3.12 -m unittest discover -s tests -v
             sh -n rc.d/postfix_dane_policy.in
             mandoc -T lint man/postfix-dane-policy.8 || true
