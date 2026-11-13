@@ -1,6 +1,6 @@
 PORTNAME=	postfix-dane-policy
 DISTVERSIONPREFIX=	v
-DISTVERSION=	0.2.0
+DISTVERSION=	0.3.0
 CATEGORIES=	mail python
 PKGNAMEPREFIX=	${PYTHON_PKGNAMEPREFIX}
 
@@ -13,13 +13,17 @@ LICENSE_FILE=	${WRKSRC}/LICENSE
 
 BUILD_DEPENDS=	${PY_SETUPTOOLS} \
 		${PYTHON_PKGNAMEPREFIX}wheel>0:devel/py-wheel@${PY_FLAVOR}
-RUN_DEPENDS=	${PYTHON_PKGNAMEPREFIX}dnspython>=2.0:dns/py-dnspython@${PY_FLAVOR}
+RUN_DEPENDS=	${PYTHON_PKGNAMEPREFIX}dnspython>=2.6.1:dns/py-dnspython@${PY_FLAVOR} \
+		${PYTHON_PKGNAMEPREFIX}idna>=3:dns/py-idna@${PY_FLAVOR}
 
 USES=		python
 USE_GITHUB=	yes
 GH_ACCOUNT=	Kernel-Error
 USE_PYTHON=	autoplist pep517
 USE_RC_SUBR=	postfix_dane_policy
+
+USERS=		danepolicy
+GROUPS=		danepolicy
 
 NO_ARCH=	yes
 

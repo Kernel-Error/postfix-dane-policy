@@ -9,10 +9,13 @@
 #
 # postfix_dane_policy_enable (bool):	Set to YES to enable.
 #					Default: NO
-# postfix_dane_policy_user (str):	Run as this user.
-#					Default: nobody
+# postfix_dane_policy_user (str):	Run the service as this user.
+#					Default: danepolicy
+# postfix_dane_policy_group (str):	Group that may connect to the socket
+#					(the group Postfix runs as).
+#					Default: postfix
 # postfix_dane_policy_args (str):	Arguments for postfix-dane-policy.
-#					Default: --listen 127.0.0.1 --port 8462 --dns 127.0.0.1
+#					Default: --socket /var/run/postfix_dane_policy/policy.sock --dns 127.0.0.1
 
 . /etc/rc.subr
 
@@ -22,21 +25,29 @@ rcvar=postfix_dane_policy_enable
 load_rc_config $name
 
 : ${postfix_dane_policy_enable:="NO"}
-: ${postfix_dane_policy_user:="nobody"}
-: ${postfix_dane_policy_args:="--listen 127.0.0.1 --port 8462 --dns 127.0.0.1"}
+: ${postfix_dane_policy_user:="danepolicy"}
+: ${postfix_dane_policy_group:="postfix"}
+: ${postfix_dane_policy_args:="--socket /var/run/postfix_dane_policy/policy.sock --dns 127.0.0.1"}
+
+# rc.subr would start the command through su(1) when ${name}_user is set.
+# Keep the daemon(8) supervisor running as root instead (root-owned pidfile)
+# and let daemon(8) drop privileges for the service process only.
+_postfix_dane_policy_runas="${postfix_dane_policy_user}"
+postfix_dane_policy_user=""
 
 rundir="/var/run/${name}"
-pidfile="${rundir}/${name}.pid"
+pidfile="/var/run/${name}.pid"
 procname="/usr/sbin/daemon"
 command="/usr/sbin/daemon"
-command_args="-f -r -P ${pidfile} -T postfix-dane-policy %%PREFIX%%/bin/postfix-dane-policy ${postfix_dane_policy_args}"
+command_args="-f -r -P ${pidfile} -u ${_postfix_dane_policy_runas} -T postfix-dane-policy %%PREFIX%%/bin/postfix-dane-policy ${postfix_dane_policy_args}"
 start_precmd="${name}_prestart"
 
-# rc.subr already runs daemon(8) as ${name}_user (via su), so daemon
-# itself must not get -u. The pidfile is written as that user.
+# Socket directory: writable for the service user, reachable only for the
+# Postfix group. The socket itself is 0666, access is controlled here.
 postfix_dane_policy_prestart()
 {
-	install -d -o "${postfix_dane_policy_user}" -m 0755 "${rundir}"
+	install -d -o "${_postfix_dane_policy_runas}" \
+	    -g "${postfix_dane_policy_group}" -m 0750 "${rundir}"
 }
 
 run_rc_command "$1"

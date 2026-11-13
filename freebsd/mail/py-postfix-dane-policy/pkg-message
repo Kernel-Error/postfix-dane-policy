@@ -2,29 +2,40 @@
 { type: install
   message: <<EOM
 postfix-dane-policy needs a local DNSSEC-validating resolver and trusts its
-AD bit. The base system's local_unbound fits the defaults (127.0.0.1):
+AD bit (it checks that at startup and answers TEMP if the resolver does
+not validate). The base system's local_unbound fits the defaults:
 
   sysrc local_unbound_enable=YES
   service local_unbound start
 
-Enable the service:
+Enable the service. It runs as user danepolicy and listens on
+/var/run/postfix_dane_policy/policy.sock, reachable for group postfix only:
 
   sysrc postfix_dane_policy_enable=YES
   service postfix_dane_policy start
 
-Other addresses (e.g. Unbound from ports in a jail) go into
-postfix_dane_policy_args, see postfix-dane-policy(8).
+Other resolver addresses go into postfix_dane_policy_args, see
+postfix-dane-policy(8).
 
 Then put it first in main.cf, before an MTA-STS resolver if you use one:
 
   smtp_tls_security_level = verify
   smtp_dns_support_level = dnssec
   smtp_tls_policy_maps =
-      socketmap:inet:127.0.0.1:8462:dane,
+      socketmap:unix:/var/run/postfix_dane_policy/policy.sock:dane,
       socketmap:inet:127.0.0.1:8461:mta-sts
 
 Note: "verify" as the global level defers mail to servers without a
 valid CA certificate or without STARTTLS.
+EOM
+}
+{ type: upgrade
+  maximum_version: "0.3.0"
+  message: <<EOM
+0.3.0 defaults to a unix socket and the dedicated user danepolicy.
+If postfix_dane_policy_args still points to TCP it keeps working; to switch,
+clear postfix_dane_policy_args and use
+socketmap:unix:/var/run/postfix_dane_policy/policy.sock:dane in main.cf.
 EOM
 }
 ]

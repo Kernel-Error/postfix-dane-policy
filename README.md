@@ -26,16 +26,29 @@ of each MX host through a validating resolver and checks the AD bit.
 |---|---|---|
 | MX DNSSEC-validated, at least one MX host has a DNSSEC-validated TLSA RRset | `OK dane-only` | DANE authentication required, no fallback |
 | MX not DNSSEC-validated, no TLSA, null MX, domain does not exist | `NOTFOUND` | next map (MTA-STS) or global level |
-| SERVFAIL, bogus DNSSEC, timeout | `TEMP` | delivery is deferred, never downgraded |
-| key is a parent domain (`.example.com`) or a `[host]:port` next-hop | `NOTFOUND` | |
+| SERVFAIL, bogus DNSSEC, timeout, lookup budget exceeded | `TEMP` | delivery is deferred, never downgraded |
+| resolver does not validate DNSSEC (self-test failed) | `TEMP` | delivery is deferred until the resolver validates again |
+| key is a parent domain (`.example.com`), a `[host]:port` next-hop or not a valid domain name | `NOTFOUND` | |
 
-No MX record means the domain itself is checked as the implicit MX. Replies are cached
-in memory for the record TTL (60 s to 1 h); negative answers are cached for 5 minutes,
-TEMP is never cached.
+Details:
 
-With a mixed MX set (some hosts with TLSA, some without) the reply is still `dane-only`.
-Postfix then delivers only to hosts it can authenticate via DANE and skips the others,
-rather than falling back to unauthenticated TLS.
+- **CNAME MX hosts** are handled like Postfix does it (RFC 7672 section 2.2.2): if the MX host
+  name is a DNSSEC-validated alias, TLSA is looked up at the expanded name first, then at the
+  original name.
+- **No MX record** means the domain itself is checked as the implicit MX.
+- **Mixed MX sets** (some hosts with TLSA, some without) still get `dane-only`. Postfix then
+  delivers only to hosts it can authenticate via DANE and defers if none works. That is
+  fail-closed on purpose: never a fallback to unauthenticated TLS.
+- **IDN** keys are converted to A-labels with IDNA 2008 / UTS#46. Anything that is not a valid
+  hostname afterwards (control characters, spaces, overlong labels) is answered `NOTFOUND` and
+  never sent to DNS.
+- **Limits:** at most 10 MX hosts are checked (by preference), one lookup gets 20 s in total
+  (`--lookup-budget`), identical lookups that run at the same time are merged.
+- **Cache:** replies are cached for the record TTL (60 s to 1 h), negative answers for 5 minutes,
+  TEMP is never cached. LRU with 10 000 entries.
+- **Resolver self-test:** at startup and every 10 minutes (every 30 s while failing) the service
+  checks that the resolver sets the AD bit for the signed root zone. If it doesn't, every lookup
+  answers `TEMP` and an error is logged, so a misconfigured `--dns` can't silently turn DANE off.
 
 ## Platform
 
@@ -45,7 +58,7 @@ itself is plain Python and also runs elsewhere, but only FreeBSD is tested end t
 
 ## Requirements
 
-- Python 3.10 or newer, [dnspython](https://www.dnspython.org/) 2.x
+- Python 3.10 or newer, [dnspython](https://www.dnspython.org/) 2.6.1 or newer, [idna](https://pypi.org/project/idna/)
 - A **local, DNSSEC-validating resolver**. The service trusts the AD bit of that resolver
   and does not validate on its own. Don't point it at a remote resolver over an untrusted
   network.
@@ -81,18 +94,27 @@ pip install git+https://github.com/Kernel-Error/postfix-dane-policy
 
 ## Configuration
 
-Enable and start the service. The defaults (`--listen 127.0.0.1 --port 8462 --dns 127.0.0.1`)
-fit `local_unbound`:
+The port creates the user `danepolicy`. Enable and start the service; the defaults listen on a
+unix socket and use the resolver on 127.0.0.1, which fits `local_unbound`:
 
 ```sh
 sysrc postfix_dane_policy_enable=YES
 service postfix_dane_policy start
 ```
 
-Different addresses, e.g. in a jail with Unbound on 127.0.0.3 (IPv6 works too, `--listen ::1`):
+What you get:
+
+- the service runs as `danepolicy` under daemon(8), the supervisor pidfile
+  `/var/run/postfix_dane_policy.pid` belongs to root
+- the socket `/var/run/postfix_dane_policy/policy.sock` lives in a directory owned by
+  `danepolicy:postfix` with mode 0750, so only Postfix (and root) can talk to it
+
+rc.conf knobs: `postfix_dane_policy_user` (default `danepolicy`), `postfix_dane_policy_group`
+(the group Postfix runs as, default `postfix`) and `postfix_dane_policy_args`. Different resolver,
+e.g. in a jail with Unbound on 127.0.0.3:
 
 ```sh
-sysrc postfix_dane_policy_args="--listen 127.0.0.3 --port 8462 --dns 127.0.0.3"
+sysrc postfix_dane_policy_args="--socket /var/run/postfix_dane_policy/policy.sock --dns 127.0.0.3"
 service postfix_dane_policy restart
 ```
 
@@ -103,19 +125,33 @@ MTA-STS, see RFC 8461):
 smtp_tls_security_level = verify
 smtp_dns_support_level = dnssec
 smtp_tls_policy_maps =
-    socketmap:inet:127.0.0.1:8462:dane,
+    socketmap:unix:/var/run/postfix_dane_policy/policy.sock:dane,
     socketmap:inet:127.0.0.1:8461:mta-sts
 ```
 
-Options: `--listen`, `--port`, `--dns`, `--dns-port`, `--timeout`, `--mapname`
-(default `dane`), `--log syslog|stderr`. See `postfix-dane-policy(8)`.
+TCP is still possible (`--listen 127.0.0.1 --port 8462`, or `::1`) but not recommended: any
+local process could grab the port while the service restarts. Non-loopback addresses are
+refused unless you pass `--allow-remote` -- don't, the protocol has no authentication.
+
+Options: `--socket`, `--listen`, `--port`, `--allow-remote`, `--dns`, `--dns-port`, `--timeout`,
+`--lookup-budget`, `--max-connections` (default 64), `--mapname` (default `dane`),
+`--log syslog|stderr`. See `postfix-dane-policy(8)`.
 
 Quick check by hand:
 
 ```sh
-printf '14:dane posteo.de,' | nc 127.0.0.1 8462; echo
-# 12:OK dane-only,
+postmap -q posteo.de socketmap:unix:/var/run/postfix_dane_policy/policy.sock:dane
+# dane-only
+postmap -q gmail.com socketmap:unix:/var/run/postfix_dane_policy/policy.sock:dane
+# (empty: NOTFOUND)
 ```
+
+### Upgrading from 0.2.x
+
+0.3.0 switches the defaults to the unix socket and the dedicated user. If you set
+`postfix_dane_policy_args` to a TCP address it keeps working, but consider moving to the socket
+and changing the first `smtp_tls_policy_maps` entry to `socketmap:unix:...`. Without the port,
+create the user yourself: `pw groupadd danepolicy -g 801 && pw useradd danepolicy -u 801 -g danepolicy -d /nonexistent -s /usr/sbin/nologin`.
 
 ## Things to know before you switch to `verify`
 
@@ -127,6 +163,8 @@ printf '14:dane posteo.de,' | nc 127.0.0.1 8462; echo
   recipient's MX lookup the MX hostname itself can be spoofed. That is a limit of
   `verify`, MTA-STS and DANE close it.
 - Set `delay_warning_time` so senders learn early that a message is stuck.
+- The service is fail-closed: DNS trouble, a non-validating resolver or a stopped service lead
+  to deferred mail, never to plaintext. Watch the queue after changes.
 
 ## Related projects
 
